@@ -1,0 +1,32 @@
+# settings.yml do SearXNG
+# Mantém os defaults do upstream; sobrescreve só o que precisamos.
+# (use_default_settings: true puxa TUDO do settings.yml embutido na imagem
+#  e só aplica o que está aqui embaixo)
+use_default_settings: true
+
+server:
+  # 0.0.0.0 pra aceitar conexões de fora do container
+  bind_address: "0.0.0.0"
+  port: 8080
+  # segredo lido do .env do compose (env:SEARXNG_SECRET)
+  secret_key: "env:SEARXNG_SECRET"
+
+search:
+  # libera JSON pra clientes tipo a Aurora consumirem /search?format=json
+  formats:
+    - html
+    - json
+  # idioma padrão
+  default_lang: "pt-BR"
+  # 0 = sem filtro, 1 = moderado, 2 = estrito
+  safe_search: 0
+
+# Descomenta se quiser limitar quem usa a instância (bom pra servidor exposto)
+#   Cada entrada = IP ou CIDR liberado
+# enabled_plugins:
+#   - 'Self IP'
+#
+#   limiter:
+#     enabled: true
+#     interval: 60
+#     retries: 5

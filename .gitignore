@@ -1,0 +1,51 @@
+# =============================================================================
+# Aurora — arquivos que NUNCA devem ir pro git
+# =============================================================================
+
+# --- Variáveis de ambiente (NUNCA) -------------------------------------------
+.env
+.env.local
+.env.production
+.env.development
+.env.*~
+!.env.example
+searxng/.env
+searxng/.env.local
+searxng/.env.*~
+!searxng/.env.example
+
+# --- Banco SQLite (contém nome, profissão, conversas, aprendizados) ----------
+data/*.db
+data/*.db-*
+data/*.db-shm
+data/*.db-wal
+
+# --- Dados pessoais: profile antigo, cache de IP, etc ------------------------
+data/*.yml
+data/*.yml.*
+data/*.json
+data/*.json.*
+
+# --- Logs (podem conter tokens, IPs, paths internos) -------------------------
+logs/*.log
+logs/*.log.*
+
+# --- SearXNG: config/ e compose SIM, runtime/data NÃO -----------------------
+searxng/data/
+
+# --- Runtime / cache ---------------------------------------------------------
+.bundle/
+vendor/bundle/
+tmp/
+*.gem
+.ruby-lsp/
+.byebug_history
+
+# --- Editores e IDEs ---------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

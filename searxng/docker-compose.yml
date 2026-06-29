@@ -1,0 +1,16 @@
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: always
+    ports:
+      - "${SEARXNG_BIND_ADDR:-0.0.0.0}:${SEARXNG_PORT_HOST:-8888}:8080"
+    volumes:
+      - ./config:/etc/searxng
+      - ./data:/var/cache/searxng
+    env_file:
+      - .env
+    # descomenta pra limitar memória
+    # mem_limit: 512m
+    # descomenta se seu servidor usa Docker com user namespaces
+    # user: "1000:1000"
