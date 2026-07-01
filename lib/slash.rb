@@ -7,13 +7,57 @@ require_relative '../lib/memory'
 module Slash
   module_function
 
-  COMMANDS = %w[/sair /exit /quit /limpar /clear /cls /modelo /model
-                /perfil /profile /esquecer /forget /ferramentas /tools
-                /ajuda /help /sessoes /sessions /carregar /load
-                /apagar-sessao /delete-session].freeze
+  # Registry único: fonte da verdade para dispatch, palette, autocomplete e ajuda.
+  COMMAND_SPECS = [
+    { names: %w[/ajuda /help],                  arg: nil,    group: 'Geral',    desc: 'Mostra esta lista de comandos' },
+    { names: %w[/ferramentas /tools],           arg: nil,    group: 'Geral',    desc: 'Lista as ferramentas disponíveis' },
+    { names: %w[/sair /exit /quit],             arg: nil,    group: 'Geral',    desc: 'Encerra o chat (gera título da sessão)' },
+
+    { names: %w[/limpar /clear /cls],           arg: nil,    group: 'Sessões',  desc: 'Começa uma nova conversa' },
+    { names: %w[/sessoes /sessions],            arg: nil,    group: 'Sessões',  desc: 'Lista as últimas sessões salvas' },
+    { names: %w[/carregar /load],               arg: '<N>',  group: 'Sessões',  desc: 'Continua a sessão de número N' },
+    { names: %w[/apagar-sessao /delete-session],arg: '<N>',  group: 'Sessões',  desc: 'Remove a sessão N do banco' },
+
+    { names: %w[/modelo /model],                arg: '[nome]', group: 'Config', desc: 'Mostra ou troca o modelo em uso' },
+    { names: %w[/perfil /profile],              arg: nil,    group: 'Memória',  desc: 'Mostra os fatos lembrados sobre você' },
+    { names: %w[/esquecer /forget],             arg: '<chave>', group: 'Memória', desc: 'Apaga um fato do seu perfil' }
+  ].freeze
+
+  COMMANDS = COMMAND_SPECS.flat_map { |s| s[:names] }.freeze
+
+  # Nomes "principais" (primeiro alias de cada comando) — usados no autocomplete.
+  PRIMARY_NAMES = COMMAND_SPECS.map { |s| s[:names].first }.freeze
 
   def command?(input)
     input.is_a?(String) && input.start_with?('/')
+  end
+
+  # Sugestões para o autocomplete do Readline (TAB).
+  def completions(prefix)
+    return [] unless prefix.to_s.start_with?('/')
+
+    PRIMARY_NAMES.select { |n| n.start_with?(prefix) }
+  end
+
+  # Comando mais parecido com o que foi digitado (para "você quis dizer?").
+  def suggest(cmd)
+    cmd = cmd.to_s.downcase
+    by_prefix = PRIMARY_NAMES.select { |n| n.start_with?(cmd[0, 3]) }
+    return by_prefix.first unless by_prefix.empty?
+
+    PRIMARY_NAMES.min_by { |n| levenshtein(n, cmd) }
+  end
+
+  def levenshtein(a, b)
+    m = Array.new(a.length + 1) { |i| [i] + Array.new(b.length, 0) }
+    (0..b.length).each { |j| m[0][j] = j }
+    (1..a.length).each do |i|
+      (1..b.length).each do |j|
+        cost = a[i - 1] == b[j - 1] ? 0 : 1
+        m[i][j] = [m[i - 1][j] + 1, m[i][j - 1] + 1, m[i - 1][j - 1] + cost].min
+      end
+    end
+    m[a.length][b.length]
   end
 
   # ctx = { config:, chat:, current_session_id:, profile:, profile_delete:,
@@ -24,6 +68,12 @@ module Slash
     parts = input.strip.split(/\s+/)
     cmd   = parts[0].downcase
     args  = parts[1..] || []
+
+    # "/" sozinho (ou "/?") → abre a palette de comandos
+    if cmd == '/' || cmd == '/?'
+      UI.command_palette(COMMAND_SPECS)
+      return { action: :continue }
+    end
 
     case cmd
     when '/sair', '/exit', '/quit'
@@ -46,10 +96,13 @@ module Slash
     when '/apagar-sessao', '/delete-session'
       handle_delete_session(args, ctx)
     when '/ajuda', '/help'
-      UI.help
+      UI.help(COMMAND_SPECS)
       { action: :continue }
     else
-      UI.warn("Comando desconhecido: #{cmd}. Digite /ajuda.")
+      hint = suggest(cmd)
+      msg = "Comando desconhecido: #{cmd}."
+      msg += " Você quis dizer #{UI::C::CYAN}#{hint}#{UI::C::RESET}?" if hint
+      UI.warn("#{msg} Digite #{UI::C::CYAN}/#{UI::C::RESET} para ver todos.")
       { action: :continue }
     end
   end

@@ -39,6 +39,8 @@ require_relative 'tools/localidade'
 require_relative 'tools/searxng'
 require_relative 'tools/user_facts'
 require_relative 'tools/memoria'
+require_relative 'tools/diagrama'
+require_relative 'tools/arquivos'
 
 # -----------------------------------------------------------------------------
 # 1. Configuração
@@ -89,28 +91,29 @@ def build_system_prompt(agent_name, cfg, current_session_title: nil)
     end
 
   <<~PROMPT
-    Você é #{agent_name}, uma assistente de IA prestativa, direta e curiosa, que fala português do Brasil.
-
-    Comportamento:
-    - Seja concisa. Respostas curtas e úteis são melhores que respostas longas e vazias.
-    - Quando usar ferramentas, NÃO narre cada passo — apenas execute e dê a resposta final.
-    - Quando citar informação vinda da web, mencione a fonte (URL) entre colchetes, ex: [https://...].
-    - Quando receber um resultado de ferramenta, use-o de forma inteligente: resuma, destaque o que importa.
-    - Se uma ferramenta der erro, explique em uma frase e sugira alternativa em vez de despejar o stacktrace.
-
-    Sobre o usuário:
-    - Você tem uma ferramenta "salvar_fato_usuario" para guardar informações persistentes sobre o usuário
-      (nome, idade, profissão, cidade, preferências, projetos).
-    - SEMPRE que o usuário disser algo pessoal e persistente, chame-a automaticamente — sem pedir confirmação.
-    - Use snake_case nas chaves: nome, idade, cidade, profissao, empresa, projeto_atual, etc.
-    - Se já souber algo (graças ao bloco abaixo), NÃO pergunte de novo.
-
-    Sobre o aprendizado:
-    - Você tem uma ferramenta "memoria" pra registrar o que o USUÁRIO aprendeu em estudos.
-    - Quando o usuário disser "agora entendi X", "já sabia disso", "esquece que eu tinha dúvida sobre Y",
-      chame-a automaticamente pra registrar/atualizar o nível de proficiência.
-    - Antes de explicar algo, USE "buscar_aprendizado" pra ver o que ele já sabe — não repita o básico.
-    - Adapte a profundidade da explicação à proficiência registrada.
+    Você é #{agent_name}, uma assistente de IA em português do Brasil: direta, curiosa e útil.
+    Hoje é #{Time.now.strftime('%d/%m/%Y')}.
+    ## Estilo
+    - Concisa por padrão: respostas curtas e densas valem mais que longas e vagas.
+    - Pode usar Markdown (negrito, listas, `código`, blocos ```); o terminal renderiza.
+    - Não narre seu processo nem anuncie chamadas de ferramenta — execute e entregue o resultado.
+    - Ao citar a web, inclua a fonte entre colchetes: [https://...].
+    - Se uma ferramenta falhar, explique em uma frase e ofereça alternativa (sem stacktrace).
+    ## Memória persistente (use em silêncio, sem pedir confirmação)
+    Só registre informação DURÁVEL e AFIRMADA pelo usuário. Nunca salve hipóteses,
+    brainstorming exploratório ("e se eu fizesse…") ou pedidos efêmeros.
+    - `user_facts` (acao: "salvar") → fatos SOBRE o usuário: identidade, contexto e
+      preferências estáveis (nome, cidade, profissao, empresa, projeto_atual,
+      linguagem_favorita). Chave em snake_case; use categoria project/preference/context.
+    - `memoria` (acao: "salvar") → CONHECIMENTO que o usuário adquiriu (tópicos de
+      estudo, skills). Antes de explicar um tema, use `memoria` (acao: "buscar") para
+      ver o que ele já domina e ajustar a profundidade — não repita o básico.
+    Roteamento em caso de dúvida: fato pessoal/preferência → user_facts;
+    algo que ele aprendeu → memoria. Se já constar abaixo, não pergunte de novo
+    nem salve de novo.
+    ## Data e tempo
+    - Quando a resposta depender de data/hora atuais ou de algo que muda no tempo,
+      use a ferramenta de hora em vez de assumir.
     #{facts_block}
     #{learnings_block}
     #{session_block}
@@ -128,7 +131,11 @@ def build_tools(cfg, logger, current_session_id)
     LocalidadeTool.new(config: cfg),
     PesquisaWebTool.new(config: cfg),
     UserFactsTool.new(logger: logger, current_session_id: current_session_id),
-    MemoriaTool.new(logger: logger)
+    MemoriaTool.new(logger: logger),
+    DiagramaTool.new,
+    LerArquivoTool.new,
+    ListarDiretorioTool.new,
+    BuscarCodigoTool.new
   ]
 end
 
@@ -202,9 +209,9 @@ chat = build_chat(cfg, system_prompt, TOOLS, thinking_spinner, logger,
 # 9. Banner e boot
 # -----------------------------------------------------------------------------
 UI.banner(cfg.agent_name)
-puts "  #{UI::C::DIM}Modelo: #{cfg.llm_model}  ·  API: #{cfg.llm_api_base}#{UI::C::RESET}"
-puts "  #{UI::C::DIM}SearXNG: #{cfg.searxng_url}  ·  DB: #{cfg.db_path}  ·  Tools: #{TOOLS.size}#{UI::C::RESET}"
-puts "  #{UI::C::DIM}Sessão: ##{current_session_id}  ·  Digite /ajuda para ver comandos.#{UI::C::RESET}"
+UI.boot_line('modelo' => cfg.llm_model, 'api' => cfg.llm_api_base)
+UI.boot_line('searxng' => cfg.searxng_url, 'tools' => TOOLS.size)
+UI.boot_line('sessão' => "##{current_session_id}", 'db' => File.basename(cfg.db_path))
 puts
 
 facts = Memory.facts_all
@@ -216,7 +223,12 @@ unless topics.empty?
   UI.info("Aprendizados: #{topics.size} tópico(s) — " \
           "#{topics.first(3).map { |t| t['topic'] }.join(', ')}#{topics.size > 3 ? '…' : ''}")
 end
-UI.info("Diga \"oi\" para começar, ou faça uma pergunta.")
+UI.info("Digite #{UI::C::CYAN}/#{UI::C::RESET}#{UI::C::DIM} para ver os comandos, ou faça uma pergunta.")
+
+# Autocomplete dos comandos slash (TAB completa, dupla-TAB lista)
+Readline.completion_append_character = ' '
+Readline.completer_word_break_characters = ''
+Readline.completion_proc = proc { |s| Slash.completions(s) }
 
 # -----------------------------------------------------------------------------
 # 10. Loop principal
@@ -265,7 +277,7 @@ end
 
 loop do
   begin
-    input = Readline.readline("\n  #{UI::C::BOLD}#{UI::C::BLUE}Você#{UI::C::RESET}  #{UI::C::DIM}›#{UI::C::RESET} ", true)
+    input = Readline.readline("#{UI::C::BOLD}#{UI::C::BLUE}Você#{UI::C::RESET}  #{UI::C::DIM}›#{UI::C::RESET} ", true)
   rescue Interrupt
     puts
     UI.info('Até mais!')
@@ -341,24 +353,27 @@ loop do
     thinking_spinner.update('pensando…')
     thinking_spinner.start
 
+    renderer = UI::Markdown.new(indent: UI::GUTTER)
+
     response = chat.ask(input) do |chunk|
       thinking_text = chunk.respond_to?(:thinking) ? chunk.thinking : nil
       thinking_str  = thinking_text.respond_to?(:text) ? thinking_text.text : thinking_text.to_s
       if thinking_str && !thinking_str.empty?
-        thinking_spinner.update("pensando… (#{thinking_str.length} chars)")
+        # mostra ao vivo a última linha do raciocínio (1 linha, sem poluir)
+        last_line = thinking_str.split("\n").reject(&:empty?).last.to_s
+        preview   = UI.truncate(last_line.strip, [UI.term_width - 16, 24].max)
+        thinking_spinner.update("pensando · #{preview}")
         thinking_spinner.start unless thinking_spinner.running?
       end
 
       if chunk.content && !chunk.content.to_s.empty?
-        if thinking_spinner.running?
-          thinking_spinner.stop(clear: true)
-        end
-        print chunk.content
-        $stdout.flush
+        thinking_spinner.stop(clear: true) if thinking_spinner.running?
+        renderer.push(chunk.content)
       end
     end
 
     thinking_spinner.stop(clear: true)
+    renderer.finish
     UI.assistant_end
 
     assistant_content = response&.content.to_s
