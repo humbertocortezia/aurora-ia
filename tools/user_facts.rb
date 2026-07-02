@@ -5,11 +5,12 @@ require_relative '../lib/memory'
 
 class UserFactsTool < RubyLLM::Tool
   description 'Gerencia o perfil persistente do usuário: salva, lista ou apaga fatos. ' \
-              'CHAME "salvar" AUTOMATICAMENTE sempre que o usuário revelar uma informação ' \
-              'pessoal persistente (nome, idade, profissão, cidade, gostos, hábitos, projetos, etc). ' \
-              'Não peça confirmação — apenas salve e siga a conversa. ' \
-              'Chaves sugeridas: nome, idade, cidade, profissao, empresa, hobbies, preferencias, ' \
-              'projeto_atual, linguagem_favorita. Use snake_case nas chaves. ' \
+              'Salve automaticamente (sem pedir confirmação) quando o usuário revelar uma ' \
+              'informação pessoal estável: nome, idade, profissão, cidade, gostos, hábitos, ' \
+              'projetos, linguagem favorita, etc. Salve apenas uma vez por informação — se já ' \
+              'está no perfil, não salve de novo. ' \
+              'Chaves sugeridas (snake_case): nome, idade, cidade, profissao, empresa, hobbies, ' \
+              'preferencias, projeto_atual, linguagem_favorita. ' \
               '\n\nDIFERENÇA DE MemoriaTool: ' \
               'ESTA tool guarda fatos SOBRE o usuário (identidade, preferências, contexto). ' \
               'A MemoriaTool guarda CONHECIMENTOS que o usuário adquiriu (estudos, skills, tópicos aprendidos).'
@@ -57,12 +58,8 @@ class UserFactsTool < RubyLLM::Tool
   private
 
   def salvar(chave, valor, categoria)
-    if chave.nil? || chave.to_s.strip.empty?
-      return 'Erro: chave é obrigatória para salvar.'
-    end
-    if valor.nil? || valor.to_s.strip.empty?
-      return "Erro: valor é obrigatório para salvar \"#{chave}\"."
-    end
+    return 'Erro: chave é obrigatória para salvar.' if chave.nil? || chave.to_s.strip.empty?
+    return "Erro: valor é obrigatório para salvar \"#{chave}\"." if valor.nil? || valor.to_s.strip.empty?
 
     r = Memory.fact_set(
       key: chave, value: valor, category: categoria || 'user',
@@ -82,9 +79,7 @@ class UserFactsTool < RubyLLM::Tool
   end
 
   def esquecer(chave)
-    if chave.nil? || chave.to_s.strip.empty?
-      return 'Erro: chave é obrigatória para esquecer.'
-    end
+    return 'Erro: chave é obrigatória para esquecer.' if chave.nil? || chave.to_s.strip.empty?
 
     r = Memory.fact_delete(key: chave, logger: @logger)
     if r[:existed]

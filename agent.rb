@@ -22,6 +22,10 @@ require 'readline'
 require 'json'
 require 'time'
 
+# Exceções lançadas pelo watchdog de turn/timeout
+class ThinkingTimeout < StandardError; end
+class TurnTimeout < StandardError; end
+
 require 'ruby_llm'
 
 require_relative 'lib/ui'
@@ -43,6 +47,27 @@ require_relative 'tools/diagrama'
 require_relative 'tools/arquivos'
 
 # -----------------------------------------------------------------------------
+# Monkey-patch: permite que callbacks before_tool_call cancelem a execução
+# da tool (skip) ou parem o loop de tools do turno (halt).
+# -----------------------------------------------------------------------------
+module RubyLLM
+  class Chat
+    ToolHaltSignal = Class.new(StandardError)
+    ToolSkipSignal = Class.new(StandardError)
+
+    alias _aurora_orig_execute_tool_with_callbacks execute_tool_with_callbacks
+
+    def execute_tool_with_callbacks(tool_call)
+      _aurora_orig_execute_tool_with_callbacks(tool_call)
+    rescue ToolHaltSignal => e
+      Tool::Halt.new(e.message)
+    rescue ToolSkipSignal => e
+      { error: e.message }
+    end
+  end
+end
+
+# -----------------------------------------------------------------------------
 # 1. Configuração
 # -----------------------------------------------------------------------------
 cfg = Config.load(base_dir: __dir__)
@@ -52,7 +77,7 @@ logger.info("startup model=#{cfg.llm_model} base=#{cfg.llm_api_base} " \
             "searxng=#{cfg.searxng_url} db=#{cfg.db_path} thinking=#{cfg.agent_thinking}")
 
 RubyLLM.configure do |c|
-  c.openai_api_key         = cfg.llm_api_key
+  c.openai_api_key = cfg.llm_api_key
   c.openai_api_base         = cfg.llm_api_base
   c.openai_use_system_role  = cfg.llm_use_system_role
   c.request_timeout         = 180
@@ -79,8 +104,8 @@ end
 # -----------------------------------------------------------------------------
 # 3. System prompt
 # -----------------------------------------------------------------------------
-def build_system_prompt(agent_name, cfg, current_session_title: nil)
-  facts_block    = Memory.facts_to_prompt_block
+def build_system_prompt(agent_name, _cfg, current_session_title: nil)
+  facts_block = Memory.facts_to_prompt_block
   learnings_block = Memory.learnings_to_prompt_block(limit: 30)
 
   session_block =
@@ -93,24 +118,55 @@ def build_system_prompt(agent_name, cfg, current_session_title: nil)
   <<~PROMPT
     Você é #{agent_name}, uma assistente de IA em português do Brasil: direta, curiosa e útil.
     Hoje é #{Time.now.strftime('%d/%m/%Y')}.
-    ## Estilo
+
+    ## Estilo de resposta
     - Concisa por padrão: respostas curtas e densas valem mais que longas e vagas.
-    - Pode usar Markdown (negrito, listas, `código`, blocos ```); o terminal renderiza.
+    - Use Markdown (negrito, listas, `código`, blocos ```); o terminal renderiza.
     - Não narre seu processo nem anuncie chamadas de ferramenta — execute e entregue o resultado.
-    - Ao citar a web, inclua a fonte entre colchetes: [https://...].
     - Se uma ferramenta falhar, explique em uma frase e ofereça alternativa (sem stacktrace).
-    ## Memória persistente (use em silêncio, sem pedir confirmação)
-    Só registre informação DURÁVEL e AFIRMADA pelo usuário. Nunca salve hipóteses,
-    brainstorming exploratório ("e se eu fizesse…") ou pedidos efêmeros.
-    - `user_facts` (acao: "salvar") → fatos SOBRE o usuário: identidade, contexto e
+
+    ## Raciocínio interno (thinking)
+    - MANTENHA O RACIOCÍNIO CURTO. Decida uma vez e vá para a resposta; não revire
+      a mesma decisão várias vezes.
+    - Se está em dúvida entre duas ações, escolha a mais simples e prossiga.
+
+    ## Início de conversa e memória contextual
+    - Se ainda não souber o nome do usuário, pergunte antes de prosseguir.
+    - Se já souber, apenas responda à pergunta atual.
+    - Se ele perguntar sobre o que falavam antes, recupere o contexto no histórico
+      arquivado e continue a conversa de onde parou.
+
+    ## Quando buscar na web
+    Use `pesquisa_web` quando a resposta depende de informação que:
+      (a) muda no tempo (preços, versões, notícias, status de serviços); ou
+      (b) você NÃO tem certeza o suficiente para afirmar de memória.
+    NÃO busque na web para:
+      - conceitos gerais que você domina (ex.: "o que é um callback?");
+      - cumprimentos ou perguntas sobre o próprio usuário.
+    Regra única: em caso de dúvida se sabe, pesquise; em caso de certeza, responda.
+    Ao citar a web, inclua a fonte entre colchetes: [https://...].
+
+    ## Ferramentas — regras de uso
+    - Não anuncie chamadas; execute e entregue o resultado.
+    - Não chame a mesma tool com os mesmos argumentos mais de uma vez no mesmo turno.
+    - Se já salvou um fato ou aprendizado nesta conversa, não salve de novo.
+
+    ## Memória persistente (silenciosa, sem pedir confirmação)
+    Registre ONLY informação DURÁVEL e AFIRMADA pelo usuário:
+      - NÃO salve brainstorming exploratório ("e se eu fizesse…") nem pedidos efêmeros.
+      - NÃO salve a mesma informação duas vezes. Se já consta nos blocos abaixo, ignore.
+
+    `user_facts` (acao: "salvar") → fatos SOBRE o usuário: identidade, contexto e
       preferências estáveis (nome, cidade, profissao, empresa, projeto_atual,
       linguagem_favorita). Chave em snake_case; use categoria project/preference/context.
-    - `memoria` (acao: "salvar") → CONHECIMENTO que o usuário adquiriu (tópicos de
-      estudo, skills). Antes de explicar um tema, use `memoria` (acao: "buscar") para
-      ver o que ele já domina e ajustar a profundidade — não repita o básico.
-    Roteamento em caso de dúvida: fato pessoal/preferência → user_facts;
-    algo que ele aprendeu → memoria. Se já constar abaixo, não pergunte de novo
-    nem salve de novo.
+
+    `memoria` (acao: "salvar") → CONHECIMENTO que o usuário adquiriu (tópicos de
+      estudo, skills). Antes de explicar um tema, use `memoria` (acao: "buscar")
+      para ver o que ele já domina e ajustar a profundidade — não repita o básico.
+
+    Roteamento (ÚNICA regra): fato pessoal/preferência → `user_facts`;
+      conhecimento que ele aprendeu → `memoria`. Sempre.
+
     ## Data e tempo
     - Quando a resposta depender de data/hora atuais ou de algo que muda no tempo,
       use a ferramenta de hora em vez de assumir.
@@ -163,19 +219,35 @@ def build_chat(cfg, system_prompt, tools, thinking_spinner, logger, memory_recor
     logger.warn("with_thinking falhou: #{e.message} — seguindo sem thinking explícito")
   end
 
-  tool_count_this_turn = { n: 0 }
+  turn_state = { count: 0, seen: Set.new }
+  chat.instance_variable_set(:@_aurora_turn_state, turn_state)
 
   chat.before_tool_call do |tc|
-    tool_count_this_turn[:n] += 1
+    # assinatura canônica para dedupe
+    sig = "#{tc.name}:#{tc.arguments.to_h.sort_by { |k, _| k.to_s }.inspect}"
+    if turn_state[:seen].include?(sig)
+      UI.warn("Tool '#{tc.name}' já chamada com os mesmos argumentos neste " \
+              'turno — bloqueada.')
+      logger.warn("tool.duplicate name=#{tc.name} args=#{tc.arguments.inspect}")
+      raise RubyLLM::Chat::ToolSkipSignal,
+            "Tool '#{tc.name}' já foi chamada com estes mesmos argumentos neste " \
+            'turno. NÃO repita — siga a conversa e responda ao usuário.'
+    end
+    turn_state[:seen] << sig
+
+    turn_state[:count] += 1
     thinking_spinner.stop(clear: true) if thinking_spinner.running?
     logger.info("tool.call name=#{tc.name} args=#{tc.arguments.inspect} " \
-                "turn_n=#{tool_count_this_turn[:n]}")
+                "turn_n=#{turn_state[:count]}")
     UI.tool_call(tc.name, tc.arguments)
     memory_recorder[:on_tool_call]&.call(tc)
 
-    if tool_count_this_turn[:n] > cfg.agent_max_tool_calls
+    if turn_state[:count] > cfg.agent_max_tool_calls
       UI.warn("Limite de #{cfg.agent_max_tool_calls} tool calls atingido neste turno.")
-      logger.warn("tool.limit_reached n=#{tool_count_this_turn[:n]} max=#{cfg.agent_max_tool_calls}")
+      logger.warn("tool.limit_reached n=#{turn_state[:count]} max=#{cfg.agent_max_tool_calls}")
+      raise RubyLLM::Chat::ToolHaltSignal,
+            "Você atingiu o limite de #{cfg.agent_max_tool_calls} chamadas de " \
+            'ferramenta neste turno. Pare de chamar tools e responda ao usuário agora.'
     end
   end
 
@@ -215,9 +287,7 @@ UI.boot_line('sessão' => "##{current_session_id}", 'db' => File.basename(cfg.db
 puts
 
 facts = Memory.facts_all
-unless facts.empty?
-  UI.info("Perfil: #{facts.size} fato(s) lembrado(s).")
-end
+UI.info("Perfil: #{facts.size} fato(s) lembrado(s).") unless facts.empty?
 topics = Memory.list_topics
 unless topics.empty?
   UI.info("Aprendizados: #{topics.size} tópico(s) — " \
@@ -308,7 +378,8 @@ loop do
     when :exit
       # fecha sessão e gera título
       Memory.close_session(current_session_id)
-      title = Compaction.generate_title(cfg, Memory.list_messages(session_id: current_session_id, limit: 6), logger: logger)
+      title = Compaction.generate_title(cfg, Memory.list_messages(session_id: current_session_id, limit: 6),
+                                        logger: logger)
       Memory.set_session_title(current_session_id, title) if title
       logger.info("session.close id=#{current_session_id} title=#{title.inspect} command=/sair")
       break
@@ -321,9 +392,11 @@ loop do
       ctx[:current_session_id] = current_session_id
       logger.info("session.open id=#{current_session_id} reason=clear")
       UI.info("Nova sessão ##{current_session_id}.")
-      chat = rebuild_chat!(cfg, logger, build_system_prompt(cfg.agent_name, cfg), thinking_spinner, current_session_id, { tools: TOOLS })
+      chat = rebuild_chat!(cfg, logger, build_system_prompt(cfg.agent_name, cfg), thinking_spinner, current_session_id,
+                           { tools: TOOLS })
     when :change_model
-      chat = rebuild_chat!(cfg, logger, build_system_prompt(cfg.agent_name, cfg), thinking_spinner, current_session_id, { tools: TOOLS })
+      chat = rebuild_chat!(cfg, logger, build_system_prompt(cfg.agent_name, cfg), thinking_spinner, current_session_id,
+                           { tools: TOOLS })
       logger.info("chat.model_changed model=#{cfg.llm_model}")
     when :load_session
       # fecha sessão atual e troca
@@ -333,7 +406,8 @@ loop do
       ctx[:current_session_id] = current_session_id
       sess = Memory.get_session(current_session_id)
       logger.info("session.load id=#{current_session_id} title=#{sess&.dig('title')}")
-      chat = rebuild_chat!(cfg, logger, build_system_prompt(cfg.agent_name, cfg, current_session_title: sess&.dig('title')), thinking_spinner, current_session_id, { tools: TOOLS })
+      chat = rebuild_chat!(cfg, logger,
+                           build_system_prompt(cfg.agent_name, cfg, current_session_title: sess&.dig('title')), thinking_spinner, current_session_id, { tools: TOOLS })
     when :continue, nil
       # nada
     end
@@ -341,7 +415,7 @@ loop do
   end
 
   # persistir msg do user
-  msg_id = Memory.add_message(
+  Memory.add_message(
     session_id: current_session_id, role: 'user', content: input
   )
 
@@ -355,21 +429,65 @@ loop do
 
     renderer = UI::Markdown.new(indent: UI::GUTTER)
 
-    response = chat.ask(input) do |chunk|
-      thinking_text = chunk.respond_to?(:thinking) ? chunk.thinking : nil
-      thinking_str  = thinking_text.respond_to?(:text) ? thinking_text.text : thinking_text.to_s
-      if thinking_str && !thinking_str.empty?
-        # mostra ao vivo a última linha do raciocínio (1 linha, sem poluir)
-        last_line = thinking_str.split("\n").reject(&:empty?).last.to_s
-        preview   = UI.truncate(last_line.strip, [UI.term_width - 16, 24].max)
-        thinking_spinner.update("pensando · #{preview}")
-        thinking_spinner.start unless thinking_spinner.running?
-      end
+    turn_state = chat.instance_variable_get(:@_aurora_turn_state) || { count: 0, seen: Set.new }
+    turn_state[:count] = 0
+    turn_state[:seen].clear
 
-      if chunk.content && !chunk.content.to_s.empty?
-        thinking_spinner.stop(clear: true) if thinking_spinner.running?
-        renderer.push(chunk.content)
+    # watchdog de turn: aborta se só-thinking por muito tempo ou turn total exceder
+    monitor = {
+      running: true,
+      started_at: Time.now,
+      last_chunk_at: Time.now,
+      content_started: false
+    }
+    ask_thread = Thread.current
+
+    watchdog = Thread.new do
+      while monitor[:running]
+        sleep 3
+        now = Time.now
+        elapsed = now - monitor[:started_at]
+        monitor[:last_chunk_at]
+
+        if !monitor[:content_started] && elapsed > cfg.agent_thinking_timeout
+          monitor[:running] = false
+          ask_thread.raise(ThinkingTimeout,
+                           "thinking sem risposta dopo #{cfg.agent_thinking_timeout}s")
+          break
+        end
+
+        next unless elapsed > cfg.agent_turn_timeout
+
+        monitor[:running] = false
+        ask_thread.raise(TurnTimeout,
+                         "turn excedeu #{cfg.agent_turn_timeout}s")
+        break
       end
+    end
+
+    begin
+      response = chat.ask(input) do |chunk|
+        monitor[:last_chunk_at] = Time.now
+
+        thinking_text = chunk.respond_to?(:thinking) ? chunk.thinking : nil
+        thinking_str  = thinking_text.respond_to?(:text) ? thinking_text.text : thinking_text.to_s
+        if thinking_str && !thinking_str.empty?
+          last_line = thinking_str.split("\n").reject(&:empty?).last.to_s
+          preview   = UI.truncate(last_line.strip, [UI.term_width - 16, 24].max)
+          thinking_spinner.update("pensando · #{preview}")
+          thinking_spinner.start unless thinking_spinner.running?
+        end
+
+        if chunk.content && !chunk.content.to_s.empty?
+          monitor[:content_started] = true
+          thinking_spinner.stop(clear: true) if thinking_spinner.running?
+          renderer.push(chunk.content)
+        end
+      end
+    ensure
+      monitor[:running] = false
+      watchdog&.join(2)
+      watchdog&.kill
     end
 
     thinking_spinner.stop(clear: true)
@@ -401,6 +519,17 @@ loop do
     if sess && sess['message_count'].to_i >= cfg.compaction_threshold && sess['message_count'].to_i % cfg.compaction_threshold == 0
       Compaction.maybe_compact(session_id: current_session_id, cfg: cfg, logger: logger)
     end
+  rescue ThinkingTimeout => e
+    thinking_spinner.stop(clear: true)
+    renderer&.finish
+    UI.warn("Pensei demais e travou no raciocínio (#{cfg.agent_thinking_timeout}s sem resposta). " \
+            'Tente reformular a pergunta, ou aumente AGENT_THINKING_TIMEOUT.')
+    logger.error("thinking.timeout #{e.message}")
+  rescue TurnTimeout => e
+    thinking_spinner.stop(clear: true)
+    renderer&.finish
+    UI.warn("Turno excedeu #{cfg.agent_turn_timeout}s e foi abortado.")
+    logger.error("turn.timeout #{e.message}")
   rescue RubyLLM::Error => e
     thinking_spinner.stop(clear: true)
     UI.error("Erro do modelo: #{e.message}")

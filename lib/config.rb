@@ -14,7 +14,7 @@ module Config
     Dotenv.load(env_file) if File.exist?(env_file)
 
     OpenStruct.new(
-      llm_api_base:         ENV.fetch('LLM_API_BASE', 'http://localhost:8001/v1'),
+      llm_api_base:         ENV.fetch('LLM_API_BASE', 'https://api.openai.com/v1'),
       llm_api_key:          ENV.fetch('LLM_API_KEY', 'sk-placeholder'),
       llm_model:            ENV.fetch('LLM_MODEL', 'gpt-4o-mini'),
       llm_use_system_role:  truthy?(ENV.fetch('LLM_USE_SYSTEM_ROLE', 'true')),
@@ -25,12 +25,14 @@ module Config
       searxng_timeout:      ENV.fetch('SEARXNG_TIMEOUT', '15').to_i,
 
       ipapi_url:            ENV.fetch('IPAPI_URL',
-        'http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone,query'),
+                           'http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone,query'),
 
       agent_name:           ENV.fetch('AGENT_NAME', 'Aurora'),
       agent_max_tool_calls: ENV.fetch('AGENT_MAX_TOOL_CALLS', '10').to_i,
       agent_thinking:       ENV.fetch('AGENT_THINKING_EFFORT', 'medium'),
       agent_temperature:    ENV.fetch('AGENT_TEMPERATURE', '0.4').to_f,
+      agent_thinking_timeout: ENV.fetch('AGENT_THINKING_TIMEOUT', '90').to_i,
+      agent_turn_timeout:   ENV.fetch('AGENT_TURN_TIMEOUT', '300').to_i,
 
       db_path:              File.expand_path(ENV.fetch('DB_PATH', './data/aurora.db'), base_dir),
       compaction_threshold: ENV.fetch('COMPACTION_THRESHOLD', '30').to_i,

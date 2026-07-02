@@ -21,7 +21,8 @@ class MemoriaTool < RubyLLM::Tool
               '\n\nEXEMPLOS DE CHAMADA AUTOMÁTICA:' \
               '\n- Usuário: "agora entendi como funciona generics em TS" → salvar(topic="typescript", subtopic="generics", content="…", proficiency=2)' \
               '\n- Usuário: "já usei discriminated unions em vários projetos" → atualizar pra proficiency 4' \
-              '\n- Usuário: "esquece o que sabe sobre X" → esquecer(topic="X")'
+              '\n- Usuário: "esquece o que sabe sobre X" → esquecer(topic="X")' \
+              '\n\nNÃO salve o mesmo (topic, subtopic) mais de uma vez por conversa — se já existe, apenas atualize a proficiência se o usuário afirmar explicitly um novo nível.'
 
   param :acao,
         desc: 'Ação: "salvar" (default), "listar_topicos", "buscar" ou "esquecer"',
@@ -66,12 +67,8 @@ class MemoriaTool < RubyLLM::Tool
   private
 
   def salvar(topic, subtopic, content, proficiencia)
-    if topic.to_s.strip.empty?
-      return 'Erro: topic é obrigatório pra salvar.'
-    end
-    if content.to_s.strip.empty?
-      return "Erro: content é obrigatório pra salvar o aprendizado sobre \"#{topic}\"."
-    end
+    return 'Erro: topic é obrigatório pra salvar.' if topic.to_s.strip.empty?
+    return "Erro: content é obrigatório pra salvar o aprendizado sobre \"#{topic}\"." if content.to_s.strip.empty?
 
     prof = proficiencia.nil? ? 2 : proficiencia.to_i
     r = Memory.learning_save(
@@ -111,9 +108,7 @@ class MemoriaTool < RubyLLM::Tool
   end
 
   def esquecer(topic, subtopic)
-    if topic.to_s.strip.empty?
-      return 'Erro: topic é obrigatório pra esquecer.'
-    end
+    return 'Erro: topic é obrigatório pra esquecer.' if topic.to_s.strip.empty?
 
     r = Memory.learning_delete(topic: topic, subtopic: subtopic)
     if r[:deleted].to_i > 0
